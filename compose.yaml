@@ -1,0 +1,42 @@
+# compose.yaml — dimini.sh
+#
+# Standalone mode:   docker compose up
+#   Starts the app + its own postgres service.
+#
+# Workspace merge:   docker compose -f ../../compose.yaml -f compose.yaml up
+#   The app service picks up the shared `postgres` service from the parent compose.
+#   The local `postgres` service defined here is NOT included in the merged file
+#   because the workspace compose already provides one.
+#
+# To run standalone, set DATABASE_URL yourself or rely on the defaults below.
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://dev:somepass@postgres:5432/diminish
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: somepass
+      POSTGRES_DB: diminish
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d diminish"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql
+
+volumes:
+  pgdata:
