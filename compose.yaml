@@ -12,11 +12,15 @@
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      target: dev
     ports:
       - "3000:3000"
     environment:
       DATABASE_URL: postgres://dev:somepass@postgres:5432/diminish
+    volumes:
+      - .:/home/app
     depends_on:
       postgres:
         condition: service_healthy
