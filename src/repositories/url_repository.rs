@@ -44,6 +44,7 @@ impl From<sqlx::Error> for RepositoryError {
 }
 
 /// Postgres-backed repository for `Url` domain entities.
+#[derive(Clone)]
 pub struct UrlRepository {
     pool: sqlx::PgPool,
 }

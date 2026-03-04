@@ -5,14 +5,30 @@ pub mod settings;
 pub mod use_cases;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Json, Path, State},
     http::{header, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Router,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use use_cases::create_short_code::{CreateShortCodeError, CreateShortCodeUseCase};
 use use_cases::get_url::{GetUrlError, GetUrlUseCase, UrlRepositoryPort};
+
+// ---------------------------------------------------------------------------
+// App state
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct AppState<R: UrlRepositoryPort + Clone + Send + Sync + 'static> {
+    pub get_url: Arc<GetUrlUseCase<R>>,
+    pub create_short_code: Arc<CreateShortCodeUseCase<R>>,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
 
 async fn root() -> &'static str {
     "Welcome to dimini.sh"
@@ -20,43 +36,73 @@ async fn root() -> &'static str {
 
 /// Stub: redirect a short_code to its canonical URL.
 /// Implementation intentionally omitted — tests drive the green phase.
-async fn redirect_short_code<R: UrlRepositoryPort + Send + Sync + 'static>(
-    State(use_case): State<Arc<GetUrlUseCase<R>>>,
+async fn redirect_short_code<R: UrlRepositoryPort + Clone + Send + Sync + 'static>(
+    State(state): State<AppState<R>>,
     Path(short_code): Path<String>,
 ) -> axum::response::Response {
-    match use_case.execute(&short_code).await {
+    match state.get_url.execute(&short_code).await {
         Ok(record) => (StatusCode::FOUND, [(header::LOCATION, record.canonical)]).into_response(),
         Err(GetUrlError::NotFound) => StatusCode::NOT_FOUND.into_response(),
         Err(GetUrlError::Repository(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
+#[derive(Deserialize)]
+struct CreateShortCodeRequest {
+    url: String,
+    short_code: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CreateShortCodeResponse {
+    short_code: String,
+}
+
+async fn create_short_code<R: UrlRepositoryPort + Clone + Send + Sync + 'static>(
+    State(state): State<AppState<R>>,
+    Json(body): Json<CreateShortCodeRequest>,
+) -> axum::response::Response {
+    match state.create_short_code
+        .execute(&body.url, body.short_code.as_deref())
+        .await
+    {
+        Ok(code) => (StatusCode::CREATED, Json(CreateShortCodeResponse { short_code: code })).into_response(),
+        Err(CreateShortCodeError::InvalidUrl(_)) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Err(CreateShortCodeError::ShortCodeConflict) => StatusCode::CONFLICT.into_response(),
+        Err(CreateShortCodeError::Repository(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 /// Build the application router.
-///
-/// Accepts an `Arc<GetUrlUseCase<R>>` so that tests can inject a mock-backed
-/// use case while `main()` provides the real Postgres-backed one.
-pub fn app<R>(use_case: Arc<GetUrlUseCase<R>>) -> Router
+pub fn app<R>(state: AppState<R>) -> Router
 where
-    R: UrlRepositoryPort + Send + Sync + 'static,
+    R: UrlRepositoryPort + Clone + Send + Sync + 'static,
 {
     Router::new()
         .route("/", get(root))
+        .route("/", post(create_short_code::<R>))
         .route("/:short_code", get(redirect_short_code::<R>))
-        .with_state(use_case)
+        .with_state(state)
 }
 
 #[tokio::main]
 async fn main() {
     use repositories::url_repository::UrlRepository;
+    use services::short_code::ShortCodeService;
     use settings::Settings;
 
     let settings = Settings::load();
     let pool = sqlx::PgPool::connect(settings.get_database_url())
         .await
         .expect("failed to connect to database");
-    let repo = UrlRepository::new(pool);
-    let use_case = Arc::new(GetUrlUseCase::new(repo));
-    let router = app(use_case);
+    let state = AppState {
+        get_url: Arc::new(GetUrlUseCase::new(UrlRepository::new(pool.clone()))),
+        create_short_code: Arc::new(CreateShortCodeUseCase::new(
+            UrlRepository::new(pool),
+            ShortCodeService::new(settings.get_short_code_length()),
+        )),
+    };
+    let router = app(state);
     let listener = tokio::net::TcpListener::bind(settings.get_host())
         .await
         .expect("failed to bind");
@@ -67,7 +113,10 @@ async fn main() {
 mod tests {
     use super::*;
     use crate::repositories::url_repository::{RepositoryError, UrlRecord, UrlRepositoryPort};
+    use crate::services::short_code::ShortCodeService;
+    use crate::use_cases::create_short_code::CreateShortCodeUseCase;
     use axum_test::TestServer;
+    use serde_json::{json, Value};
     use uuid::Uuid;
 
     // -----------------------------------------------------------------------
@@ -120,14 +169,20 @@ mod tests {
         }
     }
 
-    /// Build a `TestServer` with a mock-backed use case.
+    /// Build an `AppState` and `TestServer` with a mock-backed use case.
     fn test_server(repo: MockUrlRepository) -> TestServer {
-        let use_case = Arc::new(GetUrlUseCase::new(repo));
-        TestServer::new(app(use_case)).unwrap()
+        let state = AppState {
+            get_url: Arc::new(GetUrlUseCase::new(repo.clone())),
+            create_short_code: Arc::new(CreateShortCodeUseCase::new(
+                repo,
+                ShortCodeService::new(4),
+            )),
+        };
+        TestServer::new(app(state)).unwrap()
     }
 
     // -----------------------------------------------------------------------
-    // Tests
+    // GET / tests
     // -----------------------------------------------------------------------
 
     /// GET / must return HTTP 200.
@@ -141,6 +196,10 @@ mod tests {
         let response = server.get("/").await;
         response.assert_status_ok();
     }
+
+    // -----------------------------------------------------------------------
+    // GET /:short_code tests
+    // -----------------------------------------------------------------------
 
     /// GET /:short_code for a known short_code must return HTTP 302 with the
     /// canonical URL in the `Location` header.
@@ -177,5 +236,100 @@ mod tests {
         let response = server.get("/no-such-code").await;
 
         response.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------------
+    // POST / tests
+    // -----------------------------------------------------------------------
+
+    /// POST / with a valid URL and no short_code must return HTTP 201 with a
+    /// JSON body containing a `short_code` key.
+    ///
+    /// Business rule: clients that do not care which short code is assigned
+    /// must receive a freshly generated one. The response must be 201 Created
+    /// and the body must expose the assigned `short_code` so the client can
+    /// share it.
+    #[tokio::test]
+    async fn post_url_returns_201_with_short_code() {
+        // "noslot" will never be generated; all generated codes hit Ok(None).
+        let repo = MockUrlRepository::new("noslot", "https://other.com/");
+        let server = test_server(repo);
+
+        let response = server
+            .post("/")
+            .json(&json!({ "url": "https://example.com/" }))
+            .await;
+
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let body: Value = response.json();
+        assert!(
+            body.get("short_code").is_some(),
+            "response body must contain a `short_code` key, got: {body}"
+        );
+    }
+
+    /// POST / with a valid URL and an explicit short_code must return HTTP 201
+    /// with the exact short_code echoed in the response body.
+    ///
+    /// Business rule: clients may supply a preferred vanity short_code. When
+    /// that code is available the service must honour it and confirm it in the
+    /// response, so the client can construct the final short URL deterministically.
+    #[tokio::test]
+    async fn post_url_with_explicit_short_code_returns_201_with_that_code() {
+        // "taken" is the known code for a different URL; "mycode" is free (Ok(None)).
+        let repo = MockUrlRepository::new("taken", "https://other.com/");
+        let server = test_server(repo);
+
+        let response = server
+            .post("/")
+            .json(&json!({ "url": "https://example.com/", "short_code": "mycode" }))
+            .await;
+
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let body: Value = response.json();
+        assert_eq!(
+            body.get("short_code").and_then(|v| v.as_str()),
+            Some("mycode"),
+            "response body must echo the supplied short_code, got: {body}"
+        );
+    }
+
+    /// POST / with an invalid URL must return HTTP 422 Unprocessable Entity.
+    ///
+    /// Business rule: the service must reject malformed URLs before attempting
+    /// to store them. A 422 tells the client the request was understood but the
+    /// payload is semantically invalid, which is distinct from a syntax error (400).
+    #[tokio::test]
+    async fn post_url_with_invalid_url_returns_422() {
+        let repo = MockUrlRepository::new("irrelevant", "https://example.com/");
+        let server = test_server(repo);
+
+        let response = server
+            .post("/")
+            .json(&json!({ "url": "not-a-valid-url!!!" }))
+            .await;
+
+        response.assert_status(axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// POST / with a short_code that is already taken by a different URL must
+    /// return HTTP 409 Conflict.
+    ///
+    /// Business rule: when a client requests a specific short_code that already
+    /// maps to a different URL the service must refuse with 409 Conflict so the
+    /// client knows to pick a different vanity code rather than assume success.
+    #[tokio::test]
+    async fn post_url_with_conflicting_short_code_returns_409() {
+        // "taken" maps to "https://other.com/" — a different canonical than the
+        // one being submitted, so CreateShortCodeUseCase returns ShortCodeConflict.
+        let repo = MockUrlRepository::new("taken", "https://other.com/");
+        let server = test_server(repo);
+
+        let response = server
+            .post("/")
+            .json(&json!({ "url": "https://example.com/", "short_code": "taken" }))
+            .await;
+
+        response.assert_status(axum::http::StatusCode::CONFLICT);
     }
 }
