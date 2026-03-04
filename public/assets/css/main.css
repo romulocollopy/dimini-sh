@@ -1,0 +1,52 @@
+* {
+  box-sizing: content-box;
+}
+
+html, body {
+  height: 100%;
+}
+
+body * {
+  font-family: Verdana, Helvetica, 'Trebuchet MS', 'Courrier New';
+  font-size: 24px;
+  line-height: 2em;
+  border-radius: 5px;
+}
+
+body {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  overflow: hidden;
+  align-content: stretch;
+}
+
+section[name="content"], form, div.result {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-content: stretch;
+  width: 100%;
+}
+
+section[name="content"] {
+  margin: 200px 10px;
+  max-width: 480px;
+  padding: 10px;
+}
+
+
+form > * {
+  margin: 5px 0;
+  padding: 5px;
+  width: 100%;
+  color: rgb(120, 120, 120);
+}
+
+div.result {
+  display: flex;
+}
+
+div.result code {
+  font-family: revert;
+}
