@@ -1,6 +1,7 @@
 use crate::domain::entities::url::Url;
 use crate::repositories::url_repository::{RepositoryError, UrlRepositoryPort};
 use crate::services::short_code::ShortCodeService;
+use crate::utils::hash::sha256_hex;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -36,6 +37,16 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
             .map_err(|e| CreateShortCodeError::InvalidUrl(e.to_string()))?;
 
         let caller_provided = short_code.is_some();
+
+        if !caller_provided {
+            let hash = sha256_hex(&url.to_canonical());
+            match self.repo.find_by_hash(&hash).await {
+                Ok(Some(record)) => return Ok(record.short_code),
+                Ok(None) => {}
+                Err(e) => return Err(CreateShortCodeError::Repository(e)),
+            }
+        }
+
         let mut code = short_code
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.short_code_service.generate());
@@ -74,6 +85,12 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -89,6 +106,8 @@ mod tests {
         find_calls: Mutex<Vec<String>>,
         save_calls: Mutex<Vec<(String, String)>>,
         save_error: Option<String>,
+        find_by_hash_response: Option<Result<Option<UrlRecord>, RepositoryError>>,
+        find_by_hash_call_count: Mutex<usize>,
     }
 
     impl MockUrlRepository {
@@ -98,6 +117,8 @@ mod tests {
                 find_calls: Mutex::new(vec![]),
                 save_calls: Mutex::new(vec![]),
                 save_error: None,
+                find_by_hash_response: None,
+                find_by_hash_call_count: Mutex::new(0),
             }
         }
 
@@ -107,6 +128,8 @@ mod tests {
                 find_calls: Mutex::new(vec![]),
                 save_calls: Mutex::new(vec![]),
                 save_error: None,
+                find_by_hash_response: None,
+                find_by_hash_call_count: Mutex::new(0),
             }
         }
 
@@ -116,7 +139,17 @@ mod tests {
                 find_calls: Mutex::new(vec![]),
                 save_calls: Mutex::new(vec![]),
                 save_error: Some(message.to_string()),
+                find_by_hash_response: None,
+                find_by_hash_call_count: Mutex::new(0),
             }
+        }
+
+        fn with_find_by_hash_response(
+            mut self,
+            response: Result<Option<UrlRecord>, RepositoryError>,
+        ) -> Self {
+            self.find_by_hash_response = Some(response);
+            self
         }
     }
 
@@ -131,6 +164,16 @@ mod tests {
                 Ok(None)
             } else {
                 responses.remove(0)
+            }
+        }
+
+        async fn find_by_hash(&self, _hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
+            *self.find_by_hash_call_count.lock().unwrap() += 1;
+            match &self.find_by_hash_response {
+                Some(Ok(Some(record))) => Ok(Some(record.clone())),
+                Some(Ok(None)) => Ok(None),
+                Some(Err(e)) => Err(RepositoryError::Other(format!("{:?}", e))),
+                None => Ok(None),
             }
         }
 
@@ -270,5 +313,57 @@ mod tests {
         let uc = use_case_with(repo);
         let result = uc.execute("https://example.com/retry", None).await;
         assert!(result.is_ok(), "expected Ok after retry, got {:?}", result);
+    }
+
+    /// When `short_code` is None and the URL already exists in the database,
+    /// `execute` must return the existing short code without calling
+    /// `save_with_short_code`.
+    ///
+    /// Business rule: submitting the same URL twice with no explicit short_code
+    /// must be idempotent — the original short code is returned and no duplicate
+    /// row is written.
+    #[tokio::test]
+    async fn execute_returns_existing_short_code_when_url_already_in_db() {
+        let existing = make_record("https://example.com/existing", "exist1");
+        let existing_code = existing.short_code.clone();
+        let repo = MockUrlRepository::always_empty()
+            .with_find_by_hash_response(Ok(Some(existing)));
+        let uc = use_case_with(repo);
+
+        let result = uc.execute("https://example.com/existing", None).await;
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_eq!(
+            result.unwrap(),
+            existing_code,
+            "must return the existing short code, not a newly generated one"
+        );
+        let save_calls = uc.repo.save_calls.lock().unwrap();
+        assert!(
+            save_calls.is_empty(),
+            "save_with_short_code must NOT be called when URL already exists, got {:?}",
+            *save_calls
+        );
+    }
+
+    /// When `short_code` is `Some`, `find_by_hash` must not be called at all.
+    ///
+    /// Business rule: hash-based deduplication only applies when no explicit
+    /// short_code is requested. Explicit codes take a different path and must
+    /// not trigger unnecessary database lookups.
+    #[tokio::test]
+    async fn execute_does_not_call_find_by_hash_when_short_code_provided() {
+        let repo = MockUrlRepository::always_empty();
+        let uc = use_case_with(repo);
+
+        let result = uc.execute("https://example.com/", Some("explicit")).await;
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        let call_count = *uc.repo.find_by_hash_call_count.lock().unwrap();
+        assert_eq!(
+            call_count, 0,
+            "find_by_hash must NOT be called when short_code is Some, called {} time(s)",
+            call_count
+        );
     }
 }

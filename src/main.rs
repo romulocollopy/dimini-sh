@@ -3,6 +3,7 @@ pub mod repositories;
 pub mod services;
 pub mod settings;
 pub mod use_cases;
+pub mod utils;
 
 use axum::{
     extract::{Json, Path, State},
@@ -172,6 +173,10 @@ mod tests {
             } else {
                 Ok(None)
             }
+        }
+
+        async fn find_by_hash(&self, _hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
+            Ok(None)
         }
 
         async fn save_with_short_code(

@@ -1,5 +1,5 @@
 use crate::domain::entities::url::Url;
-use sha2::{Digest, Sha256};
+use crate::utils::hash::sha256_hex;
 use sqlx::Row;
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,8 @@ pub struct UrlRecord {
 
 pub trait UrlRepositoryPort {
     fn find_by_short_code(&self, short_code: &str) -> impl std::future::Future<Output = Result<Option<UrlRecord>, RepositoryError>> + Send;
+
+    fn find_by_hash(&self, hash: &str) -> impl std::future::Future<Output = Result<Option<UrlRecord>, RepositoryError>> + Send;
 
     fn save_with_short_code(&self, url: &Url, short_code: &str) -> impl std::future::Future<Output = Result<uuid::Uuid, RepositoryError>> + Send;
 }
@@ -135,6 +137,10 @@ impl UrlRepositoryPort for UrlRepository {
         UrlRepository::save_with_short_code(self, url, short_code).await
     }
 
+    async fn find_by_hash(&self, hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
+        UrlRepository::find_by_hash(self, hash).await
+    }
+
     async fn find_by_short_code(&self, short_code: &str) -> Result<Option<UrlRecord>, RepositoryError> {
         let row = sqlx::query(
             r#"
@@ -161,12 +167,7 @@ impl UrlRepositoryPort for UrlRepository {
     }
 }
 
-/// Compute SHA-256 hex digest of a string.
-fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
+
 
 // ---------------------------------------------------------------------------
 // Tests

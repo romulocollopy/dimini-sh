@@ -101,6 +101,10 @@ mod tests {
             }
         }
 
+        async fn find_by_hash(&self, _hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
+            Ok(None)
+        }
+
         async fn save_with_short_code(
             &self,
             _url: &crate::domain::entities::url::Url,
