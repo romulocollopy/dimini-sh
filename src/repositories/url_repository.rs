@@ -203,30 +203,10 @@ mod tests {
             .await
             .expect("failed to connect to test database");
 
-        // Ensure the table exists; ignore "duplicate table" races from parallel tests.
-        let create_result = sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS urls (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                canonical TEXT NOT NULL,
-                url_hash TEXT NOT NULL,
-                parsed_url JSONB NOT NULL,
-                short_code TEXT,
-                caller_provided BOOLEAN NOT NULL DEFAULT FALSE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await;
-        if let Err(e) = create_result {
-            // 42P07 = duplicate_table; tolerate it from concurrent test runs.
-            let is_dup = e.to_string().contains("23505") || e.to_string().contains("42P07")
-                || e.to_string().contains("duplicate");
-            if !is_dup {
-                panic!("failed to create urls table: {:?}", e);
-            }
-        }
+        sqlx::migrate!()
+            .run(&pool)
+            .await
+            .expect("failed to run migrations on test database");
 
         pool
     }
