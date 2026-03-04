@@ -2,12 +2,14 @@
   box-sizing: content-box;
 }
 
-html, body {
+html,
+body {
   height: 100%;
+  color: rgb(120, 120, 120);
 }
 
 body * {
-  font-family: Verdana, Helvetica, 'Trebuchet MS', 'Courrier New';
+  font-family: Verdana, Helvetica, "Trebuchet MS", "Courrier New";
   font-size: 24px;
   line-height: 2em;
   border-radius: 5px;
@@ -21,7 +23,9 @@ body {
   align-content: stretch;
 }
 
-section[name="content"], form, div.result {
+section[name="content"],
+form,
+div.result {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
@@ -34,7 +38,6 @@ section[name="content"] {
   max-width: 480px;
   padding: 10px;
 }
-
 
 form > * {
   margin: 5px 0;
