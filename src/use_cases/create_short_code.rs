@@ -43,10 +43,11 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
         if !caller_provided {
             let hash = sha256_hex(&url.to_canonical());
             match self.repo.find_by_hash(&hash).await {
-                Ok(Some(record)) => {
+                Ok(Some(record)) if !record.caller_provided => {
                     info!(short_code = %record.short_code, caller_provided = false, "dedup hit: returning existing short code");
                     return Ok(record.short_code);
                 }
+                Ok(Some(_)) => {}
                 Ok(None) => {}
                 Err(e) => return Err(CreateShortCodeError::Repository(e)),
             }
@@ -205,6 +206,10 @@ mod tests {
     }
 
     fn make_record(url_str: &str, short_code: &str) -> UrlRecord {
+        make_record_with_caller_provided(url_str, short_code, false)
+    }
+
+    fn make_record_with_caller_provided(url_str: &str, short_code: &str, caller_provided: bool) -> UrlRecord {
         let url = Url::parse(url_str).unwrap();
         UrlRecord {
             id: Uuid::new_v4(),
@@ -212,7 +217,7 @@ mod tests {
             url_hash: "testhash".to_string(),
             parsed_url: serde_json::Value::Null,
             short_code: short_code.to_string(),
-            caller_provided: false,
+            caller_provided,
         }
     }
 
@@ -398,6 +403,84 @@ mod tests {
         assert!(
             *caller_provided,
             "expected caller_provided == true when short_code is Some, got false"
+        );
+    }
+
+    /// When `find_by_hash` returns a record where `caller_provided = false`,
+    /// the existing auto-generated short code IS returned and no new row is saved.
+    ///
+    /// Business rule: an auto-generated short code is a safe, recyclable alias.
+    /// Re-using it avoids link proliferation while keeping the URL space tidy.
+    /// Only records that were NOT explicitly chosen by a caller qualify for reuse.
+    #[tokio::test]
+    async fn execute_returns_existing_short_code_when_hash_match_is_auto_generated() {
+        let url_str = "https://example.com/auto-dedup";
+        // caller_provided = false → safe to reuse
+        let existing = make_record_with_caller_provided(url_str, "auto1", false);
+        let existing_code = existing.short_code.clone();
+        let repo = MockUrlRepository::always_empty()
+            .with_find_by_hash_response(Ok(Some(existing)));
+        let uc = use_case_with(repo);
+
+        let result = uc.execute(url_str, None).await;
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_eq!(
+            result.unwrap(),
+            existing_code,
+            "must return the existing auto-generated short code"
+        );
+        let save_calls = uc.repo.save_calls.lock().unwrap();
+        assert!(
+            save_calls.is_empty(),
+            "save_with_short_code must NOT be called when reusing an auto-generated code, got {:?}",
+            *save_calls
+        );
+    }
+
+    /// When `find_by_hash` returns a record where `caller_provided = true`,
+    /// the use case must NOT reuse that short code. Instead it must generate a
+    /// new random short code and save it with `caller_provided = false`.
+    ///
+    /// Business rule: a caller-provided (vanity) code is the caller's chosen
+    /// alias and belongs to them. Silently handing it back to a different
+    /// anonymous request would undermine the caller's intent and could expose
+    /// private or branded links to unrelated traffic. Auto-generate a fresh
+    /// code instead.
+    #[tokio::test]
+    async fn execute_generates_new_short_code_when_hash_match_is_caller_provided() {
+        let url_str = "https://example.com/vanity-dedup";
+        // caller_provided = true → must NOT be reused
+        let vanity = make_record_with_caller_provided(url_str, "vanity1", true);
+        let vanity_code = vanity.short_code.clone();
+        let repo = MockUrlRepository::always_empty()
+            .with_find_by_hash_response(Ok(Some(vanity)));
+        let uc = use_case_with(repo);
+
+        let result = uc.execute(url_str, None).await;
+
+        assert!(result.is_ok(), "expected Ok after falling through to new code generation, got {:?}", result);
+        let returned_code = result.unwrap();
+        assert_ne!(
+            returned_code,
+            vanity_code,
+            "must NOT return the caller-provided short code; got the vanity code back"
+        );
+        let save_calls = uc.repo.save_calls.lock().unwrap();
+        assert_eq!(
+            save_calls.len(),
+            1,
+            "save_with_short_code must be called exactly once for the new code, got {:?}",
+            *save_calls
+        );
+        let (_, saved_code, saved_caller_provided) = &save_calls[0];
+        assert_eq!(
+            saved_code, &returned_code,
+            "the saved code must match the returned code"
+        );
+        assert!(
+            !saved_caller_provided,
+            "new auto-generated code must be saved with caller_provided = false"
         );
     }
 
