@@ -38,7 +38,7 @@ EXPOSE 3000
 #   cargo test
 #   cargo tarpaulin --out Html
 #   cargo build
-CMD ["cargo", "watch", "-w", "src", "-w", "Cargo.toml", "-w", "Cargo.lock", "-x", "run"]
+CMD ["watch", "-w", "src", "-w", "Cargo.toml", "-w", "Cargo.lock", "-x", "run"]
 
 # ── production builder ────────────────────────────────────────────────────────
 FROM rust:1.93.1 AS builder

@@ -17,8 +17,10 @@ services:
       target: dev
     ports:
       - "3000:3000"
+    tty: true
     environment:
       DATABASE_URL: postgres://dev:somepass@postgres:5432/diminish
+      TERM: xterm-256color
     volumes:
       - .:/home/app
     depends_on:
