@@ -47,6 +47,19 @@ async fn redirect_short_code<R: UrlRepositoryPort + Clone + Send + Sync + 'stati
     }
 }
 
+/// Stub: return URL record details as JSON for a given short_code.
+/// Implementation intentionally omitted — tests drive the green phase.
+async fn about_short_code<R: UrlRepositoryPort + Clone + Send + Sync + 'static>(
+    State(state): State<AppState<R>>,
+    Path(short_code): Path<String>,
+) -> axum::response::Response {
+    match state.get_url.execute(&short_code).await {
+        Ok(record) => (StatusCode::OK, Json(record)).into_response(),
+        Err(GetUrlError::NotFound) => StatusCode::NOT_FOUND.into_response(),
+        Err(GetUrlError::Repository(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct CreateShortCodeRequest {
     url: String,
@@ -82,6 +95,7 @@ where
         .route("/", get(root))
         .route("/", post(create_short_code::<R>))
         .route("/:short_code", get(redirect_short_code::<R>))
+        .route("/:short_code/about", get(about_short_code::<R>))
         .with_state(state)
 }
 
@@ -331,5 +345,52 @@ mod tests {
             .await;
 
         response.assert_status(axum::http::StatusCode::CONFLICT);
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /:short_code/about tests
+    // -----------------------------------------------------------------------
+
+    /// GET /:short_code/about for a known short_code must return HTTP 200 with
+    /// a JSON body containing the full URL record fields.
+    ///
+    /// Business rule: clients need metadata about a short link (canonical URL,
+    /// hash, parsed URL structure) without being redirected. The /about endpoint
+    /// exposes all UrlRecord fields as JSON so clients can inspect link details.
+    #[tokio::test]
+    async fn get_about_returns_200_with_url_details() {
+        let canonical = "https://example.com/destination";
+        let repo = MockUrlRepository::new("abc1", canonical);
+        let server = test_server(repo);
+
+        let response = server.get("/abc1/about").await;
+
+        response.assert_status(axum::http::StatusCode::OK);
+        let body: Value = response.json();
+        assert_eq!(
+            body.get("canonical").and_then(|v| v.as_str()),
+            Some(canonical),
+            "response body must contain the canonical URL, got: {body}"
+        );
+        assert_eq!(
+            body.get("short_code").and_then(|v| v.as_str()),
+            Some("abc1"),
+            "response body must contain the short_code, got: {body}"
+        );
+    }
+
+    /// GET /:short_code/about for an unknown short_code must return HTTP 404.
+    ///
+    /// Business rule: if a short_code has no corresponding URL record the
+    /// /about endpoint must return 404 Not Found, consistent with the redirect
+    /// endpoint behaviour.
+    #[tokio::test]
+    async fn get_about_returns_404_for_unknown_short_code() {
+        let repo = MockUrlRepository::new("known", "https://example.com/");
+        let server = test_server(repo);
+
+        let response = server.get("/no-such-code/about").await;
+
+        response.assert_status(axum::http::StatusCode::NOT_FOUND);
     }
 }

@@ -7,7 +7,7 @@ use sqlx::Row;
 // ---------------------------------------------------------------------------
 
 /// A stored URL record as returned from the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct UrlRecord {
     pub id: uuid::Uuid,
     /// JSONB-decoded canonical fields of the Url.
