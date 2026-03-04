@@ -27,6 +27,7 @@ pub struct UrlRecord {
 // Repository port (trait for dependency injection)
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(test, mockall::automock)]
 pub trait UrlRepositoryPort {
     fn find_by_short_code(&self, short_code: &str) -> impl std::future::Future<Output = Result<Option<UrlRecord>, RepositoryError>> + Send;
 

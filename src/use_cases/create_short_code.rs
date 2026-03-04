@@ -107,109 +107,23 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repositories::url_repository::{RepositoryError, UrlRecord};
-    use std::sync::Mutex;
+    use crate::repositories::url_repository::{MockUrlRepositoryPort, RepositoryError, UrlRecord};
+    use std::sync::{Arc, Mutex};
     use uuid::Uuid;
 
-    struct MockUrlRepository {
-        find_responses: Mutex<Vec<Result<Option<UrlRecord>, RepositoryError>>>,
-        find_calls: Mutex<Vec<String>>,
-        save_calls: Mutex<Vec<(String, String, bool)>>,
-        save_error: Option<String>,
-        find_by_hash_response: Option<Result<Option<UrlRecord>, RepositoryError>>,
-        find_by_hash_call_count: Mutex<usize>,
-    }
-
-    impl MockUrlRepository {
-        fn always_empty() -> Self {
-            MockUrlRepository {
-                find_responses: Mutex::new(vec![]),
-                find_calls: Mutex::new(vec![]),
-                save_calls: Mutex::new(vec![]),
-                save_error: None,
-                find_by_hash_response: None,
-                find_by_hash_call_count: Mutex::new(0),
-            }
-        }
-
-        fn with_find_responses(responses: Vec<Result<Option<UrlRecord>, RepositoryError>>) -> Self {
-            MockUrlRepository {
-                find_responses: Mutex::new(responses),
-                find_calls: Mutex::new(vec![]),
-                save_calls: Mutex::new(vec![]),
-                save_error: None,
-                find_by_hash_response: None,
-                find_by_hash_call_count: Mutex::new(0),
-            }
-        }
-
-        fn with_save_error(message: &str) -> Self {
-            MockUrlRepository {
-                find_responses: Mutex::new(vec![]),
-                find_calls: Mutex::new(vec![]),
-                save_calls: Mutex::new(vec![]),
-                save_error: Some(message.to_string()),
-                find_by_hash_response: None,
-                find_by_hash_call_count: Mutex::new(0),
-            }
-        }
-
-        fn with_find_by_hash_response(
-            mut self,
-            response: Result<Option<UrlRecord>, RepositoryError>,
-        ) -> Self {
-            self.find_by_hash_response = Some(response);
-            self
-        }
-    }
-
-    impl UrlRepositoryPort for MockUrlRepository {
-        async fn find_by_short_code(
-            &self,
-            short_code: &str,
-        ) -> Result<Option<UrlRecord>, RepositoryError> {
-            self.find_calls.lock().unwrap().push(short_code.to_string());
-            let mut responses = self.find_responses.lock().unwrap();
-            if responses.is_empty() {
-                Ok(None)
-            } else {
-                responses.remove(0)
-            }
-        }
-
-        async fn find_by_hash(&self, _hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
-            *self.find_by_hash_call_count.lock().unwrap() += 1;
-            match &self.find_by_hash_response {
-                Some(Ok(Some(record))) => Ok(Some(record.clone())),
-                Some(Ok(None)) => Ok(None),
-                Some(Err(e)) => Err(RepositoryError::Other(format!("{:?}", e))),
-                None => Ok(None),
-            }
-        }
-
-        async fn save_with_short_code(
-            &self,
-            url: &Url,
-            short_code: &str,
-            caller_provided: bool,
-        ) -> Result<Uuid, RepositoryError> {
-            self.save_calls
-                .lock()
-                .unwrap()
-                .push((url.to_canonical(), short_code.to_string(), caller_provided));
-            if let Some(ref msg) = self.save_error {
-                Err(RepositoryError::Other(msg.clone()))
-            } else {
-                Ok(Uuid::new_v4())
-            }
-        }
-    }
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
 
     fn make_record(url_str: &str, short_code: &str) -> UrlRecord {
         make_record_with_caller_provided(url_str, short_code, false)
     }
 
-    fn make_record_with_caller_provided(url_str: &str, short_code: &str, caller_provided: bool) -> UrlRecord {
+    fn make_record_with_caller_provided(
+        url_str: &str,
+        short_code: &str,
+        caller_provided: bool,
+    ) -> UrlRecord {
         let url = Url::parse(url_str).unwrap();
         UrlRecord {
             id: Uuid::new_v4(),
@@ -221,15 +135,50 @@ mod tests {
         }
     }
 
-    fn use_case_with(repo: MockUrlRepository) -> CreateShortCodeUseCase<MockUrlRepository> {
+    fn use_case_with(
+        repo: MockUrlRepositoryPort,
+    ) -> CreateShortCodeUseCase<MockUrlRepositoryPort> {
         let svc = ShortCodeService::new(4);
         CreateShortCodeUseCase::new(repo, svc)
     }
 
+    /// Build a mock whose `find_by_short_code` drains a pre-loaded queue of
+    /// responses on successive calls. All other methods succeed silently.
+    fn mock_with_find_responses(
+        responses: Vec<Result<Option<UrlRecord>, RepositoryError>>,
+    ) -> MockUrlRepositoryPort {
+        let queue = Arc::new(Mutex::new(responses));
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_short_code().returning(move |_| {
+            let result = {
+                let mut q = queue.lock().unwrap();
+                if q.is_empty() {
+                    Ok(None)
+                } else {
+                    q.remove(0)
+                }
+            };
+            Box::pin(async move { result })
+        });
+        mock.expect_find_by_hash()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code()
+            .returning(|_, _, _| Box::pin(async { Ok(Uuid::new_v4()) }));
+        mock
+    }
+
+    /// Build an always-empty mock (every method returns Ok(None) / Ok(uuid)).
+    fn mock_empty() -> MockUrlRepositoryPort {
+        mock_with_find_responses(vec![])
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
     #[tokio::test]
     async fn execute_with_valid_url_and_no_short_code_returns_ok() {
-        let repo = MockUrlRepository::always_empty();
-        let uc = use_case_with(repo);
+        let uc = use_case_with(mock_empty());
         let result = uc.execute("https://example.com/", None).await;
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
         let code = result.unwrap();
@@ -238,8 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_with_explicit_short_code_returns_that_code() {
-        let repo = MockUrlRepository::always_empty();
-        let uc = use_case_with(repo);
+        let uc = use_case_with(mock_empty());
         let result = uc.execute("https://example.com/", Some("mycode")).await;
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
         assert_eq!(result.unwrap(), "mycode");
@@ -247,8 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_with_invalid_url_returns_invalid_url_error() {
-        let repo = MockUrlRepository::always_empty();
-        let uc = use_case_with(repo);
+        let uc = use_case_with(mock_empty());
         let result = uc.execute("not-a-valid-url!!!", Some("code")).await;
         assert!(
             matches!(result, Err(CreateShortCodeError::InvalidUrl(_))),
@@ -259,9 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_calls_save_with_short_code_on_repo() {
-        let svc = ShortCodeService::new(4);
-        let inner_repo = MockUrlRepository::always_empty();
-        let uc = CreateShortCodeUseCase::new(inner_repo, svc);
+        let uc = use_case_with(mock_empty());
         let result = uc.execute("https://example.com/save-check", Some("scode")).await;
         assert!(result.is_ok(), "expected Ok after save, got {:?}", result);
     }
@@ -269,8 +214,7 @@ mod tests {
     #[tokio::test]
     async fn execute_returns_conflict_when_short_code_used_by_different_url() {
         let existing = make_record("https://other.com/", "taken");
-        let repo = MockUrlRepository::with_find_responses(vec![Ok(Some(existing))]);
-        let uc = use_case_with(repo);
+        let uc = use_case_with(mock_with_find_responses(vec![Ok(Some(existing))]));
         let result = uc.execute("https://example.com/", Some("taken")).await;
         assert!(
             matches!(result, Err(CreateShortCodeError::ShortCodeConflict)),
@@ -285,17 +229,27 @@ mod tests {
     async fn execute_is_idempotent_when_short_code_matches_same_url() {
         let url_str = "https://example.com/idempotent";
         let existing = make_record(url_str, "idem");
-        let repo = MockUrlRepository::with_find_responses(vec![Ok(Some(existing))]);
-        let uc = use_case_with(repo);
+        // find_by_short_code returns existing → idempotent early return
+        // save_with_short_code must NOT be called: expect it 0 times
+        let queue = Arc::new(Mutex::new(vec![Ok(Some(existing))]));
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_short_code().returning(move |_| {
+            let result = {
+                let mut q = queue.lock().unwrap();
+                if q.is_empty() { Ok(None) } else { q.remove(0) }
+            };
+            Box::pin(async move { result })
+        });
+        mock.expect_find_by_hash()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code().times(0);
+        let uc = use_case_with(mock);
+
         let result = uc.execute(url_str, Some("idem")).await;
+
         assert!(result.is_ok(), "expected Ok for idempotent call, got {:?}", result);
         assert_eq!(result.unwrap(), "idem");
-        let save_calls = uc.repo.save_calls.lock().unwrap();
-        assert!(
-            save_calls.is_empty(),
-            "save_with_short_code must NOT be called on idempotent path, got {:?}",
-            *save_calls
-        );
+        // mockall verifies save_with_short_code was called 0 times on drop
     }
 
     /// When all 10 generated code attempts collide with different URLs, execute must
@@ -305,12 +259,10 @@ mod tests {
     /// After 10 failed attempts it surfaces a conflict error to the caller.
     #[tokio::test]
     async fn execute_returns_conflict_after_exhausting_all_retries() {
-        // Feed 10 conflict responses (all different URL, same short_code scenario).
         let responses: Vec<_> = (0..10)
             .map(|_| Ok(Some(make_record("https://other.com/", "taken"))))
             .collect();
-        let repo = MockUrlRepository::with_find_responses(responses);
-        let uc = use_case_with(repo);
+        let uc = use_case_with(mock_with_find_responses(responses));
         let result = uc.execute("https://example.com/exhausted", None).await;
         assert!(
             matches!(result, Err(CreateShortCodeError::ShortCodeConflict)),
@@ -322,11 +274,7 @@ mod tests {
     #[tokio::test]
     async fn execute_retries_when_generated_code_is_taken() {
         let conflict = make_record("https://other.com/", "auto1");
-        let repo = MockUrlRepository::with_find_responses(vec![
-            Ok(Some(conflict)),
-            Ok(None),
-        ]);
-        let uc = use_case_with(repo);
+        let uc = use_case_with(mock_with_find_responses(vec![Ok(Some(conflict)), Ok(None)]));
         let result = uc.execute("https://example.com/retry", None).await;
         assert!(result.is_ok(), "expected Ok after retry, got {:?}", result);
     }
@@ -342,9 +290,19 @@ mod tests {
     async fn execute_returns_existing_short_code_when_url_already_in_db() {
         let existing = make_record("https://example.com/existing", "exist1");
         let existing_code = existing.short_code.clone();
-        let repo = MockUrlRepository::always_empty()
-            .with_find_by_hash_response(Ok(Some(existing)));
-        let uc = use_case_with(repo);
+
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_hash()
+            .returning(move |_| {
+                let rec = existing.clone();
+                Box::pin(async move { Ok(Some(rec)) })
+            });
+        // save must NOT be called
+        mock.expect_save_with_short_code().times(0);
+        // find_by_short_code not reached (early return after hash hit)
+        mock.expect_find_by_short_code()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        let uc = use_case_with(mock);
 
         let result = uc.execute("https://example.com/existing", None).await;
 
@@ -354,12 +312,7 @@ mod tests {
             existing_code,
             "must return the existing short code, not a newly generated one"
         );
-        let save_calls = uc.repo.save_calls.lock().unwrap();
-        assert!(
-            save_calls.is_empty(),
-            "save_with_short_code must NOT be called when URL already exists, got {:?}",
-            *save_calls
-        );
+        // mockall verifies save_with_short_code was called 0 times on drop
     }
 
     /// When `short_code` is `Some`, `find_by_hash` must not be called at all.
@@ -369,18 +322,19 @@ mod tests {
     /// not trigger unnecessary database lookups.
     #[tokio::test]
     async fn execute_does_not_call_find_by_hash_when_short_code_provided() {
-        let repo = MockUrlRepository::always_empty();
-        let uc = use_case_with(repo);
+        let mut mock = MockUrlRepositoryPort::new();
+        // find_by_hash must NOT be called
+        mock.expect_find_by_hash().times(0);
+        mock.expect_find_by_short_code()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code()
+            .returning(|_, _, _| Box::pin(async { Ok(Uuid::new_v4()) }));
+        let uc = use_case_with(mock);
 
         let result = uc.execute("https://example.com/", Some("explicit")).await;
 
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
-        let call_count = *uc.repo.find_by_hash_call_count.lock().unwrap();
-        assert_eq!(
-            call_count, 0,
-            "find_by_hash must NOT be called when short_code is Some, called {} time(s)",
-            call_count
-        );
+        // mockall verifies find_by_hash was called 0 times on drop
     }
 
     /// When the caller supplies a short_code (`Some`), `save_with_short_code`
@@ -391,13 +345,29 @@ mod tests {
     /// database accurately reflects how each short link was created.
     #[tokio::test]
     async fn execute_saves_with_caller_provided_true_when_short_code_given() {
-        let repo = MockUrlRepository::always_empty();
-        let uc = use_case_with(repo);
+        let saved_calls: Arc<Mutex<Vec<(String, String, bool)>>> =
+            Arc::new(Mutex::new(vec![]));
+        let saved_calls_clone = Arc::clone(&saved_calls);
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_hash()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_find_by_short_code()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code()
+            .times(1)
+            .returning(move |url, sc, cp| {
+                saved_calls_clone
+                    .lock()
+                    .unwrap()
+                    .push((url.to_canonical(), sc.to_string(), cp));
+                Box::pin(async { Ok(Uuid::new_v4()) })
+            });
+        let uc = use_case_with(mock);
 
         let result = uc.execute("https://example.com/cp-true", Some("mycode")).await;
 
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
-        let save_calls = uc.repo.save_calls.lock().unwrap();
+        let save_calls = saved_calls.lock().unwrap();
         assert_eq!(save_calls.len(), 1, "expected exactly one save call, got {:?}", *save_calls);
         let (_, _, caller_provided) = &save_calls[0];
         assert!(
@@ -415,12 +385,19 @@ mod tests {
     #[tokio::test]
     async fn execute_returns_existing_short_code_when_hash_match_is_auto_generated() {
         let url_str = "https://example.com/auto-dedup";
-        // caller_provided = false → safe to reuse
         let existing = make_record_with_caller_provided(url_str, "auto1", false);
         let existing_code = existing.short_code.clone();
-        let repo = MockUrlRepository::always_empty()
-            .with_find_by_hash_response(Ok(Some(existing)));
-        let uc = use_case_with(repo);
+
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_hash()
+            .returning(move |_| {
+                let rec = existing.clone();
+                Box::pin(async move { Ok(Some(rec)) })
+            });
+        mock.expect_find_by_short_code()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code().times(0);
+        let uc = use_case_with(mock);
 
         let result = uc.execute(url_str, None).await;
 
@@ -430,12 +407,7 @@ mod tests {
             existing_code,
             "must return the existing auto-generated short code"
         );
-        let save_calls = uc.repo.save_calls.lock().unwrap();
-        assert!(
-            save_calls.is_empty(),
-            "save_with_short_code must NOT be called when reusing an auto-generated code, got {:?}",
-            *save_calls
-        );
+        // mockall verifies save_with_short_code was called 0 times on drop
     }
 
     /// When `find_by_hash` returns a record where `caller_provided = true`,
@@ -450,23 +422,46 @@ mod tests {
     #[tokio::test]
     async fn execute_generates_new_short_code_when_hash_match_is_caller_provided() {
         let url_str = "https://example.com/vanity-dedup";
-        // caller_provided = true → must NOT be reused
         let vanity = make_record_with_caller_provided(url_str, "vanity1", true);
         let vanity_code = vanity.short_code.clone();
-        let repo = MockUrlRepository::always_empty()
-            .with_find_by_hash_response(Ok(Some(vanity)));
-        let uc = use_case_with(repo);
+
+        let saved_calls: Arc<Mutex<Vec<(String, String, bool)>>> =
+            Arc::new(Mutex::new(vec![]));
+        let saved_calls_clone = Arc::clone(&saved_calls);
+
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_hash()
+            .returning(move |_| {
+                let rec = vanity.clone();
+                Box::pin(async move { Ok(Some(rec)) })
+            });
+        mock.expect_find_by_short_code()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code()
+            .times(1)
+            .returning(move |url, sc, cp| {
+                saved_calls_clone
+                    .lock()
+                    .unwrap()
+                    .push((url.to_canonical(), sc.to_string(), cp));
+                Box::pin(async { Ok(Uuid::new_v4()) })
+            });
+        let uc = use_case_with(mock);
 
         let result = uc.execute(url_str, None).await;
 
-        assert!(result.is_ok(), "expected Ok after falling through to new code generation, got {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected Ok after falling through to new code generation, got {:?}",
+            result
+        );
         let returned_code = result.unwrap();
         assert_ne!(
             returned_code,
             vanity_code,
             "must NOT return the caller-provided short code; got the vanity code back"
         );
-        let save_calls = uc.repo.save_calls.lock().unwrap();
+        let save_calls = saved_calls.lock().unwrap();
         assert_eq!(
             save_calls.len(),
             1,
@@ -492,13 +487,29 @@ mod tests {
     /// can distinguish vanity codes from auto-generated ones.
     #[tokio::test]
     async fn execute_saves_with_caller_provided_false_when_short_code_generated() {
-        let repo = MockUrlRepository::always_empty();
-        let uc = use_case_with(repo);
+        let saved_calls: Arc<Mutex<Vec<(String, String, bool)>>> =
+            Arc::new(Mutex::new(vec![]));
+        let saved_calls_clone = Arc::clone(&saved_calls);
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_hash()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_find_by_short_code()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code()
+            .times(1)
+            .returning(move |url, sc, cp| {
+                saved_calls_clone
+                    .lock()
+                    .unwrap()
+                    .push((url.to_canonical(), sc.to_string(), cp));
+                Box::pin(async { Ok(Uuid::new_v4()) })
+            });
+        let uc = use_case_with(mock);
 
         let result = uc.execute("https://example.com/cp-false", None).await;
 
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
-        let save_calls = uc.repo.save_calls.lock().unwrap();
+        let save_calls = saved_calls.lock().unwrap();
         assert_eq!(save_calls.len(), 1, "expected exactly one save call, got {:?}", *save_calls);
         let (_, _, caller_provided) = &save_calls[0];
         assert!(

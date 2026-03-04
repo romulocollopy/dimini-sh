@@ -147,7 +147,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repositories::url_repository::{RepositoryError, UrlRecord, UrlRepositoryPort};
+    use crate::repositories::url_repository::{MockUrlRepositoryPort, UrlRecord};
     use crate::services::short_code::ShortCodeService;
     use crate::use_cases::create_short_code::CreateShortCodeUseCase;
     use axum_test::TestServer;
@@ -155,67 +155,95 @@ mod tests {
     use uuid::Uuid;
 
     // -----------------------------------------------------------------------
-    // Mock repository
+    // Mock helpers
     // -----------------------------------------------------------------------
 
-    /// Test double for `UrlRepositoryPort`.
-    ///
-    /// Returns a hardcoded `UrlRecord` for one known short_code; returns
-    /// `Ok(None)` for everything else.
+    /// Newtype wrapper that makes `MockUrlRepositoryPort` satisfy the
+    /// `R: Clone` bound on `AppState<R>` by sharing the mock behind `Arc`.
+    /// Cloning the wrapper shares the same underlying mock.
     #[derive(Clone)]
-    struct MockUrlRepository {
-        known_short_code: String,
-        record: UrlRecord,
-    }
+    struct ClonableMock(Arc<std::sync::Mutex<MockUrlRepositoryPort>>);
 
-    impl MockUrlRepository {
-        fn new(short_code: &str, canonical: &str) -> Self {
-            MockUrlRepository {
-                known_short_code: short_code.to_string(),
-                record: UrlRecord {
-                    id: Uuid::new_v4(),
-                    canonical: canonical.to_string(),
-                    url_hash: "mockhash".to_string(),
-                    short_code: short_code.to_string(),
-                    parsed_url: serde_json::Value::Null,
-                    caller_provided: false,
-                },
-            }
+    impl ClonableMock {
+        fn new(mock: MockUrlRepositoryPort) -> Self {
+            ClonableMock(Arc::new(std::sync::Mutex::new(mock)))
         }
     }
 
-    impl UrlRepositoryPort for MockUrlRepository {
-        async fn find_by_short_code(
+    impl UrlRepositoryPort for ClonableMock {
+        fn find_by_short_code(
             &self,
             short_code: &str,
-        ) -> Result<Option<UrlRecord>, RepositoryError> {
-            if short_code == self.known_short_code {
-                Ok(Some(self.record.clone()))
-            } else {
-                Ok(None)
-            }
+        ) -> impl std::future::Future<
+            Output = Result<Option<UrlRecord>, crate::repositories::url_repository::RepositoryError>,
+        > + Send {
+            // Acquire lock only long enough to produce the pinned future;
+            // the MutexGuard is released before the future is awaited.
+            self.0.lock().unwrap().find_by_short_code(short_code)
         }
 
-        async fn find_by_hash(&self, _hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
-            Ok(None)
-        }
-
-        async fn save_with_short_code(
+        fn find_by_hash(
             &self,
-            _url: &crate::domain::entities::url::Url,
-            _short_code: &str,
-            _caller_provided: bool,
-        ) -> Result<uuid::Uuid, RepositoryError> {
-            Ok(uuid::Uuid::new_v4())
+            hash: &str,
+        ) -> impl std::future::Future<
+            Output = Result<Option<UrlRecord>, crate::repositories::url_repository::RepositoryError>,
+        > + Send {
+            self.0.lock().unwrap().find_by_hash(hash)
+        }
+
+        fn save_with_short_code(
+            &self,
+            url: &crate::domain::entities::url::Url,
+            short_code: &str,
+            caller_provided: bool,
+        ) -> impl std::future::Future<
+            Output = Result<uuid::Uuid, crate::repositories::url_repository::RepositoryError>,
+        > + Send {
+            self.0
+                .lock()
+                .unwrap()
+                .save_with_short_code(url, short_code, caller_provided)
         }
     }
 
-    /// Build an `AppState` and `TestServer` with a mock-backed use case.
-    fn test_server(repo: MockUrlRepository) -> TestServer {
+    /// Build a `ClonableMock` that returns `Some(record)` for one known
+    /// short_code and `Ok(None)` for everything else.
+    fn make_repo(known_short_code: &str, canonical: &str) -> ClonableMock {
+        let sc = known_short_code.to_string();
+        let record = UrlRecord {
+            id: Uuid::new_v4(),
+            canonical: canonical.to_string(),
+            url_hash: "mockhash".to_string(),
+            short_code: known_short_code.to_string(),
+            parsed_url: serde_json::Value::Null,
+            caller_provided: false,
+        };
+        let mut mock = MockUrlRepositoryPort::new();
+        mock.expect_find_by_short_code()
+            .returning(move |code| {
+                let result = if code == sc {
+                    Ok(Some(record.clone()))
+                } else {
+                    Ok(None)
+                };
+                Box::pin(async move { result })
+            });
+        mock.expect_find_by_hash()
+            .returning(|_| Box::pin(async { Ok(None) }));
+        mock.expect_save_with_short_code()
+            .returning(|_, _, _| Box::pin(async { Ok(Uuid::new_v4()) }));
+        ClonableMock::new(mock)
+    }
+
+    /// Build an `AppState` and `TestServer` with two mock-backed use cases.
+    ///
+    /// Both repos must be configured with matching behaviour because the
+    /// same request may pass through either use case.
+    fn test_server(get_url_repo: ClonableMock, create_repo: ClonableMock) -> TestServer {
         let state = AppState {
-            get_url: Arc::new(GetUrlUseCase::new(repo.clone())),
+            get_url: Arc::new(GetUrlUseCase::new(get_url_repo)),
             create_short_code: Arc::new(CreateShortCodeUseCase::new(
-                repo,
+                create_repo,
                 ShortCodeService::new(4),
             )),
         };
@@ -232,8 +260,10 @@ mod tests {
     /// returns a successful response. This is the entry point for all users.
     #[tokio::test]
     async fn get_root_returns_200() {
-        let repo = MockUrlRepository::new("irrelevant", "https://example.com/");
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("irrelevant", "https://example.com/"),
+            make_repo("irrelevant", "https://example.com/"),
+        );
         let response = server.get("/").await;
         response.assert_status_ok();
     }
@@ -251,8 +281,10 @@ mod tests {
     #[tokio::test]
     async fn get_short_code_returns_302_with_location_header() {
         let canonical = "https://example.com/destination";
-        let repo = MockUrlRepository::new("abc123", canonical);
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("abc123", canonical),
+            make_repo("abc123", canonical),
+        );
 
         let response = server.get("/abc123").await;
 
@@ -274,8 +306,10 @@ mod tests {
     /// error page rather than silently failing.
     #[tokio::test]
     async fn get_short_code_returns_404_for_unknown_short_code() {
-        let repo = MockUrlRepository::new("known", "https://example.com/");
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("known", "https://example.com/"),
+            make_repo("known", "https://example.com/"),
+        );
 
         let response = server.get("/no-such-code").await;
 
@@ -296,8 +330,10 @@ mod tests {
     #[tokio::test]
     async fn post_url_returns_201_with_short_code() {
         // "noslot" will never be generated; all generated codes hit Ok(None).
-        let repo = MockUrlRepository::new("noslot", "https://other.com/");
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("noslot", "https://other.com/"),
+            make_repo("noslot", "https://other.com/"),
+        );
 
         let response = server
             .post("/")
@@ -321,8 +357,10 @@ mod tests {
     #[tokio::test]
     async fn post_url_with_explicit_short_code_returns_201_with_that_code() {
         // "taken" is the known code for a different URL; "mycode" is free (Ok(None)).
-        let repo = MockUrlRepository::new("taken", "https://other.com/");
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("taken", "https://other.com/"),
+            make_repo("taken", "https://other.com/"),
+        );
 
         let response = server
             .post("/")
@@ -345,8 +383,10 @@ mod tests {
     /// payload is semantically invalid, which is distinct from a syntax error (400).
     #[tokio::test]
     async fn post_url_with_invalid_url_returns_422() {
-        let repo = MockUrlRepository::new("irrelevant", "https://example.com/");
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("irrelevant", "https://example.com/"),
+            make_repo("irrelevant", "https://example.com/"),
+        );
 
         let response = server
             .post("/")
@@ -366,8 +406,10 @@ mod tests {
     async fn post_url_with_conflicting_short_code_returns_409() {
         // "taken" maps to "https://other.com/" — a different canonical than the
         // one being submitted, so CreateShortCodeUseCase returns ShortCodeConflict.
-        let repo = MockUrlRepository::new("taken", "https://other.com/");
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("taken", "https://other.com/"),
+            make_repo("taken", "https://other.com/"),
+        );
 
         let response = server
             .post("/")
@@ -390,8 +432,10 @@ mod tests {
     #[tokio::test]
     async fn get_about_returns_200_with_url_details() {
         let canonical = "https://example.com/destination";
-        let repo = MockUrlRepository::new("abc1", canonical);
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("abc1", canonical),
+            make_repo("abc1", canonical),
+        );
 
         let response = server.get("/abc1/about").await;
 
@@ -416,8 +460,10 @@ mod tests {
     /// endpoint behaviour.
     #[tokio::test]
     async fn get_about_returns_404_for_unknown_short_code() {
-        let repo = MockUrlRepository::new("known", "https://example.com/");
-        let server = test_server(repo);
+        let server = test_server(
+            make_repo("known", "https://example.com/"),
+            make_repo("known", "https://example.com/"),
+        );
 
         let response = server.get("/no-such-code/about").await;
 

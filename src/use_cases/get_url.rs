@@ -48,76 +48,12 @@ impl<R: UrlRepositoryPort> GetUrlUseCase<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GetUrlError, GetUrlUseCase, UrlRepositoryPort};
-    use crate::repositories::url_repository::{RepositoryError, UrlRecord};
+    use super::{GetUrlError, GetUrlUseCase};
+    use crate::repositories::url_repository::{MockUrlRepositoryPort, UrlRecord};
 
     use uuid::Uuid;
 
-    // -----------------------------------------------------------------------
-    // Mock repository
-    // -----------------------------------------------------------------------
-
-    /// A test double for `UrlRepositoryPort`.
-    ///
-    /// Tracks the argument passed to `find_by_short_code` and returns a
-    /// configurable response so each test can control the scenario.
-    struct MockUrlRepository {
-        /// If `Some`, the mock matches this short_code and returns `returned_record`.
-        known_short_code: Option<String>,
-        /// The record to return when the short_code matches.
-        returned_record: Option<UrlRecord>,
-        /// Records the last short_code argument received by `find_by_short_code`.
-        last_called_with: std::sync::Mutex<Option<String>>,
-    }
-
-    impl MockUrlRepository {
-        fn new_with_record(short_code: &str, record: UrlRecord) -> Self {
-            MockUrlRepository {
-                known_short_code: Some(short_code.to_string()),
-                returned_record: Some(record),
-                last_called_with: std::sync::Mutex::new(None),
-            }
-        }
-
-        fn new_empty() -> Self {
-            MockUrlRepository {
-                known_short_code: None,
-                returned_record: None,
-                last_called_with: std::sync::Mutex::new(None),
-            }
-        }
-    }
-
-    impl UrlRepositoryPort for MockUrlRepository {
-        async fn find_by_short_code(
-            &self,
-            short_code: &str,
-        ) -> Result<Option<UrlRecord>, RepositoryError> {
-            *self.last_called_with.lock().unwrap() = Some(short_code.to_string());
-            if self.known_short_code.as_deref() == Some(short_code) {
-                Ok(self.returned_record.as_ref().cloned())
-            } else {
-                Ok(None)
-            }
-        }
-
-        async fn find_by_hash(&self, _hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
-            Ok(None)
-        }
-
-        async fn save_with_short_code(
-            &self,
-            _url: &crate::domain::entities::url::Url,
-            _short_code: &str,
-            _caller_provided: bool,
-        ) -> Result<uuid::Uuid, RepositoryError> {
-            Ok(uuid::Uuid::new_v4())
-        }
-    }
-
     /// Helper: build a minimal `UrlRecord` with the given short_code.
-    ///
-    /// `UrlRecord` will need a `short_code: String` field added by the implementer.
     fn make_url_record(short_code: &str) -> UrlRecord {
         UrlRecord {
             id: Uuid::new_v4(),
@@ -142,7 +78,12 @@ mod tests {
     async fn execute_with_known_short_code_returns_ok_url_record() {
         let short_code = "abc123";
         let expected = make_url_record(short_code);
-        let repo = MockUrlRepository::new_with_record(short_code, make_url_record(short_code));
+        let mut repo = MockUrlRepositoryPort::new();
+        repo.expect_find_by_short_code()
+            .returning(|code| {
+                let record = make_url_record(code);
+                Box::pin(async move { Ok(Some(record)) })
+            });
         let use_case = GetUrlUseCase::new(repo);
 
         let result = use_case.execute(short_code).await;
@@ -165,19 +106,19 @@ mod tests {
     #[tokio::test]
     async fn execute_calls_repository_with_the_provided_short_code() {
         let short_code = "xyz789";
-        let repo = MockUrlRepository::new_with_record(short_code, make_url_record(short_code));
+        let mut repo = MockUrlRepositoryPort::new();
+        repo.expect_find_by_short_code()
+            .with(mockall::predicate::eq(short_code))
+            .times(1)
+            .returning(|code| {
+                let record = make_url_record(code);
+                Box::pin(async move { Ok(Some(record)) })
+            });
         let use_case = GetUrlUseCase::new(repo);
 
         let _ = use_case.execute(short_code).await;
-
-        // Access the inner repo to verify argument tracking.
-        // GetUrlUseCase must expose `repo` or we verify indirectly via the
-        // use_case's internal borrow — adapter provides inner field access.
-        assert_eq!(
-            use_case.repo().last_called_with.lock().unwrap().as_deref(),
-            Some(short_code),
-            "repository was not called with the short_code passed to execute"
-        );
+        // Verification that repository was called with the correct short_code
+        // is enforced by mockall on drop (with(eq(short_code)) + times(1)).
     }
 
     // -----------------------------------------------------------------------
@@ -191,7 +132,9 @@ mod tests {
     /// Returning `Ok(None)` or panicking are both incorrect behaviours.
     #[tokio::test]
     async fn execute_with_unknown_short_code_returns_not_found_error() {
-        let repo = MockUrlRepository::new_empty();
+        let mut repo = MockUrlRepositoryPort::new();
+        repo.expect_find_by_short_code()
+            .returning(|_| Box::pin(async { Ok(None) }));
         let use_case = GetUrlUseCase::new(repo);
 
         let result = use_case.execute("does_not_exist").await;
