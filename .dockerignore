@@ -28,6 +28,7 @@ Thumbs.db
 Dockerfile
 .dockerignore
 compose.yaml
+compose.*
 
 # Docs / misc
 *.md

@@ -64,7 +64,10 @@ async fn create_short_code<R: UrlRepositoryPort + Clone + Send + Sync + 'static>
 ) -> axum::response::Response {
     match state
         .create_short_code
-        .execute(&body.url, body.short_code.as_deref())
+        .execute(
+            &body.url,
+            body.short_code.as_deref().filter(|s| !s.is_empty()),
+        )
         .await
     {
         Ok(code) => (
@@ -289,6 +292,34 @@ mod tests {
             body.get("short_code").and_then(|v| v.as_str()),
             Some("mycode"),
             "response body must echo the supplied short_code, got: {body}"
+        );
+    }
+
+    /// POST /create/ with `"short_code": ""` must behave identically to
+    /// omitting the `short_code` field — an auto-generated code is assigned
+    /// and returned in the response.
+    ///
+    /// Business rule: an empty string carries no intent. The handler normalises
+    /// `Some("")` to `None` before passing to the use case, so callers that
+    /// submit an empty field are treated the same as callers that omit it.
+    #[tokio::test]
+    async fn post_url_with_empty_short_code_is_treated_as_none() {
+        let server = test_server(
+            make_repo("noslot", "https://other.com/"),
+            make_repo("noslot", "https://other.com/"),
+        );
+
+        let response = server
+            .post("/create/")
+            .json(&json!({ "url": "https://example.com/", "short_code": "" }))
+            .await;
+
+        response.assert_status(axum::http::StatusCode::CREATED);
+        let body: Value = response.json();
+        let code = body.get("short_code").and_then(|v| v.as_str());
+        assert!(
+            code.is_some_and(|c| !c.is_empty()),
+            "expected an auto-generated short_code, got: {body}"
         );
     }
 

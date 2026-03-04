@@ -38,29 +38,28 @@ RUN cargo install cargo-watch \
 #   cargo tarpaulin --out Html
 #   cargo build
 #
-USER app
+#
+COPY . .
 CMD ["cargo", "watch", "-w", "src", "-w", "Cargo.toml", "-w", "Cargo.lock", "--", "cargo", "run"]
 
 # ── production runtime ────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS prod
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash app
 
+WORKDIR /home/app
+
 # App binary
-COPY --from=builder /app/target/release/dimini-sh /home/app/dimini-sh
+COPY --from=builder /home/app/target/release/dimini-sh /home/app/dimini-sh
 # sqlx-cli for running migrations (make migrate-prod / entrypoint scripts)
 COPY --from=builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
 # Migration files so sqlx can find them at runtime
-COPY --chown=app:app migrations /home/app/migrations
-# Migration script
-COPY --chown=app:app scripts/migrate-prod.sh /home/app/scripts/migrate-prod.sh
-# Static assets served by the app
-COPY --chown=app:app public /home/app/public
+COPY --chown=app:app . .
 
-RUN chown app:app -R /home/app/ && chmod 500 /home/app/dimini-sh \
-    && chmod 500 /home/app/scripts/migrate-prod.sh
+RUN rm -rf src docs
 
+RUN chown app:app -R /home/app/
 USER app
 CMD ["./dimini-sh"]

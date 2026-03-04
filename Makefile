@@ -1,8 +1,17 @@
 .PHONY: start migrate migrate-prod test
 
 # Start the project (standalone, with its own postgres)
-start:
-	docker compose up --build
+start: build
+	docker compose up
+
+start-dev: build-dev
+	docker compose up -f compose.yaml -f compose.dev.yaml --build
+
+build-dev:
+	docker compose -f compose.yaml -f compose.dev.yaml build
+
+build:
+	docker compose build
 
 # Create a new migration (usage: make migrate NAME=create_urls)
 migrate:
