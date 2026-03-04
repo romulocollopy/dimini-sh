@@ -76,7 +76,7 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
         }
 
         self.repo
-            .save_with_short_code(&url, &code)
+            .save_with_short_code(&url, &code, caller_provided)
             .await
             .map_err(CreateShortCodeError::Repository)?;
 
@@ -104,7 +104,7 @@ mod tests {
     struct MockUrlRepository {
         find_responses: Mutex<Vec<Result<Option<UrlRecord>, RepositoryError>>>,
         find_calls: Mutex<Vec<String>>,
-        save_calls: Mutex<Vec<(String, String)>>,
+        save_calls: Mutex<Vec<(String, String, bool)>>,
         save_error: Option<String>,
         find_by_hash_response: Option<Result<Option<UrlRecord>, RepositoryError>>,
         find_by_hash_call_count: Mutex<usize>,
@@ -181,11 +181,12 @@ mod tests {
             &self,
             url: &Url,
             short_code: &str,
+            caller_provided: bool,
         ) -> Result<Uuid, RepositoryError> {
             self.save_calls
                 .lock()
                 .unwrap()
-                .push((url.to_canonical(), short_code.to_string()));
+                .push((url.to_canonical(), short_code.to_string(), caller_provided));
             if let Some(ref msg) = self.save_error {
                 Err(RepositoryError::Other(msg.clone()))
             } else {
@@ -202,6 +203,7 @@ mod tests {
             url_hash: "testhash".to_string(),
             parsed_url: serde_json::Value::Null,
             short_code: short_code.to_string(),
+            caller_provided: false,
         }
     }
 
@@ -364,6 +366,52 @@ mod tests {
             call_count, 0,
             "find_by_hash must NOT be called when short_code is Some, called {} time(s)",
             call_count
+        );
+    }
+
+    /// When the caller supplies a short_code (`Some`), `save_with_short_code`
+    /// must be called with `caller_provided = true`.
+    ///
+    /// Business rule: the `caller_provided` flag records the origin of the
+    /// short code. A caller-supplied code must always be tagged `true` so the
+    /// database accurately reflects how each short link was created.
+    #[tokio::test]
+    async fn execute_saves_with_caller_provided_true_when_short_code_given() {
+        let repo = MockUrlRepository::always_empty();
+        let uc = use_case_with(repo);
+
+        let result = uc.execute("https://example.com/cp-true", Some("mycode")).await;
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        let save_calls = uc.repo.save_calls.lock().unwrap();
+        assert_eq!(save_calls.len(), 1, "expected exactly one save call, got {:?}", *save_calls);
+        let (_, _, caller_provided) = &save_calls[0];
+        assert!(
+            *caller_provided,
+            "expected caller_provided == true when short_code is Some, got false"
+        );
+    }
+
+    /// When no short_code is supplied (`None`), `save_with_short_code` must
+    /// be called with `caller_provided = false`.
+    ///
+    /// Business rule: a generated short code was not chosen by the caller.
+    /// The `caller_provided` flag must be `false` so analytics and auditing
+    /// can distinguish vanity codes from auto-generated ones.
+    #[tokio::test]
+    async fn execute_saves_with_caller_provided_false_when_short_code_generated() {
+        let repo = MockUrlRepository::always_empty();
+        let uc = use_case_with(repo);
+
+        let result = uc.execute("https://example.com/cp-false", None).await;
+
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        let save_calls = uc.repo.save_calls.lock().unwrap();
+        assert_eq!(save_calls.len(), 1, "expected exactly one save call, got {:?}", *save_calls);
+        let (_, _, caller_provided) = &save_calls[0];
+        assert!(
+            !*caller_provided,
+            "expected caller_provided == false when short_code is None, got true"
         );
     }
 }

@@ -158,6 +158,7 @@ mod tests {
                     url_hash: "mockhash".to_string(),
                     short_code: short_code.to_string(),
                     parsed_url: serde_json::Value::Null,
+                    caller_provided: false,
                 },
             }
         }
@@ -183,6 +184,7 @@ mod tests {
             &self,
             _url: &crate::domain::entities::url::Url,
             _short_code: &str,
+            _caller_provided: bool,
         ) -> Result<uuid::Uuid, RepositoryError> {
             Ok(uuid::Uuid::new_v4())
         }

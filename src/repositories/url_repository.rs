@@ -18,6 +18,8 @@ pub struct UrlRecord {
     pub url_hash: String,
     /// Short code used for redirect lookups.
     pub short_code: String,
+    /// Whether the short code was supplied by the caller (`true`) or generated automatically (`false`).
+    pub caller_provided: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -29,7 +31,7 @@ pub trait UrlRepositoryPort {
 
     fn find_by_hash(&self, hash: &str) -> impl std::future::Future<Output = Result<Option<UrlRecord>, RepositoryError>> + Send;
 
-    fn save_with_short_code(&self, url: &Url, short_code: &str) -> impl std::future::Future<Output = Result<uuid::Uuid, RepositoryError>> + Send;
+    fn save_with_short_code(&self, url: &Url, short_code: &str, caller_provided: bool) -> impl std::future::Future<Output = Result<uuid::Uuid, RepositoryError>> + Send;
 }
 
 /// Repository-level errors.
@@ -84,7 +86,7 @@ impl UrlRepository {
     pub async fn find_by_hash(&self, hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
         let row = sqlx::query(
             r#"
-            SELECT id, canonical, url_hash, parsed_url, short_code
+            SELECT id, canonical, url_hash, parsed_url, short_code, caller_provided
             FROM urls
             WHERE url_hash = $1
             LIMIT 1
@@ -102,12 +104,13 @@ impl UrlRepository {
                 url_hash: r.try_get("url_hash").unwrap(),
                 parsed_url,
                 short_code: r.try_get::<Option<String>, _>("short_code").unwrap_or(None).unwrap_or_default(),
+                caller_provided: r.try_get("caller_provided").unwrap_or(false),
             }
         }))
     }
 
     /// Insert a new URL record with a short_code and return the generated UUID.
-    pub async fn save_with_short_code(&self, url: &Url, short_code: &str) -> Result<uuid::Uuid, RepositoryError> {
+    pub async fn save_with_short_code(&self, url: &Url, short_code: &str, caller_provided: bool) -> Result<uuid::Uuid, RepositoryError> {
         let canonical = url.to_canonical();
         let url_hash = sha256_hex(&canonical);
         let parsed_url = serde_json::to_value(url)
@@ -115,8 +118,8 @@ impl UrlRepository {
 
         let row = sqlx::query(
             r#"
-            INSERT INTO urls (canonical, url_hash, parsed_url, short_code)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO urls (canonical, url_hash, parsed_url, short_code, caller_provided)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id
             "#,
         )
@@ -124,6 +127,7 @@ impl UrlRepository {
         .bind(&url_hash)
         .bind(&parsed_url)
         .bind(short_code)
+        .bind(caller_provided)
         .fetch_one(&self.pool)
         .await?;
 
@@ -133,8 +137,8 @@ impl UrlRepository {
 }
 
 impl UrlRepositoryPort for UrlRepository {
-    async fn save_with_short_code(&self, url: &Url, short_code: &str) -> Result<uuid::Uuid, RepositoryError> {
-        UrlRepository::save_with_short_code(self, url, short_code).await
+    async fn save_with_short_code(&self, url: &Url, short_code: &str, caller_provided: bool) -> Result<uuid::Uuid, RepositoryError> {
+        UrlRepository::save_with_short_code(self, url, short_code, caller_provided).await
     }
 
     async fn find_by_hash(&self, hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
@@ -144,7 +148,7 @@ impl UrlRepositoryPort for UrlRepository {
     async fn find_by_short_code(&self, short_code: &str) -> Result<Option<UrlRecord>, RepositoryError> {
         let row = sqlx::query(
             r#"
-            SELECT id, canonical, url_hash, parsed_url, short_code
+            SELECT id, canonical, url_hash, parsed_url, short_code, caller_provided
             FROM urls
             WHERE short_code = $1
             LIMIT 1
@@ -162,6 +166,7 @@ impl UrlRepositoryPort for UrlRepository {
                 url_hash: r.try_get("url_hash").unwrap(),
                 parsed_url,
                 short_code: r.try_get::<Option<String>, _>("short_code").unwrap_or(None).unwrap_or_default(),
+                caller_provided: r.try_get("caller_provided").unwrap_or(false),
             }
         }))
     }
@@ -195,6 +200,7 @@ mod tests {
                 url_hash TEXT NOT NULL,
                 parsed_url JSONB NOT NULL,
                 short_code TEXT,
+                caller_provided BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             "#,
@@ -377,7 +383,7 @@ mod tests {
         let url = Url::parse("https://example.com/short-lookup?v=1").unwrap();
         let short_code = "find01";
 
-        let _id = repo.save_with_short_code(&url, short_code).await.expect("save failed");
+        let _id = repo.save_with_short_code(&url, short_code, false).await.expect("save failed");
         let result = repo.find_by_short_code(short_code).await;
 
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
@@ -398,7 +404,7 @@ mod tests {
         let url = Url::parse("https://example.com/short-field?v=2").unwrap();
         let short_code = "find02";
 
-        let _id = repo.save_with_short_code(&url, short_code).await.expect("save failed");
+        let _id = repo.save_with_short_code(&url, short_code, false).await.expect("save failed");
         let record = repo
             .find_by_short_code(short_code)
             .await
@@ -444,7 +450,7 @@ mod tests {
         let short_code = "find03";
         let expected_canonical = url.to_canonical();
 
-        let _id = repo.save_with_short_code(&url, short_code).await.expect("save failed");
+        let _id = repo.save_with_short_code(&url, short_code, false).await.expect("save failed");
         let record = repo
             .find_by_short_code(short_code)
             .await
@@ -454,6 +460,64 @@ mod tests {
         assert_eq!(
             record.canonical, expected_canonical,
             "canonical on returned record does not match Url::to_canonical()"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // caller_provided flag — integration tests
+    // -----------------------------------------------------------------------
+
+    /// Saving with `caller_provided = true` must persist the flag; retrieving
+    /// by short_code must return a record where `caller_provided == true`.
+    // integration test
+    #[tokio::test]
+    async fn saved_record_with_caller_provided_true_has_correct_flag() {
+        let pool = test_pool().await;
+        let repo = UrlRepository::new(pool);
+        let url = Url::parse("https://example.com/caller-true?v=1").unwrap();
+        let short_code = "cptrue1";
+
+        let _id = repo
+            .save_with_short_code(&url, short_code, true)
+            .await
+            .expect("save failed");
+
+        let record = repo
+            .find_by_short_code(short_code)
+            .await
+            .expect("find failed")
+            .expect("record not found");
+
+        assert!(
+            record.caller_provided,
+            "expected caller_provided == true for a caller-supplied short code, got false"
+        );
+    }
+
+    /// Saving with `caller_provided = false` must persist the flag; retrieving
+    /// by short_code must return a record where `caller_provided == false`.
+    // integration test
+    #[tokio::test]
+    async fn saved_record_with_caller_provided_false_has_correct_flag() {
+        let pool = test_pool().await;
+        let repo = UrlRepository::new(pool);
+        let url = Url::parse("https://example.com/caller-false?v=2").unwrap();
+        let short_code = "cpfalse1";
+
+        let _id = repo
+            .save_with_short_code(&url, short_code, false)
+            .await
+            .expect("save failed");
+
+        let record = repo
+            .find_by_short_code(short_code)
+            .await
+            .expect("find failed")
+            .expect("record not found");
+
+        assert!(
+            !record.caller_provided,
+            "expected caller_provided == false for a generated short code, got true"
         );
     }
 

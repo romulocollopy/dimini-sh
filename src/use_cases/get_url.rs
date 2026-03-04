@@ -109,6 +109,7 @@ mod tests {
             &self,
             _url: &crate::domain::entities::url::Url,
             _short_code: &str,
+            _caller_provided: bool,
         ) -> Result<uuid::Uuid, RepositoryError> {
             Ok(uuid::Uuid::new_v4())
         }
@@ -124,6 +125,7 @@ mod tests {
             url_hash: "abc123".to_string(),
             parsed_url: serde_json::Value::Null,
             short_code: short_code.to_string(),
+            caller_provided: false,
         }
     }
 
