@@ -1,0 +1,5 @@
+database_url: postgres://dev:somepass@postgres:5432/diminish
+env: Prod
+host: 0.0.0.0
+port: 3000
+short_code_length: 4
