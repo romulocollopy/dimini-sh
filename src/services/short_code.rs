@@ -2,7 +2,7 @@
 // ShortCodeService
 // ---------------------------------------------------------------------------
 
-use rand::{distributions::Alphanumeric, Rng};
+const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Generates random alphanumeric short codes of a fixed length.
 pub struct ShortCodeService {
@@ -18,10 +18,11 @@ impl ShortCodeService {
     ///
     /// Characters are drawn from [a-zA-Z0-9].
     pub fn generate(&self) -> String {
-        rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(self.length as usize)
-            .map(char::from)
+        (0..self.length)
+            .map(|_| {
+                let idx = rand::random_range(0..CHARSET.len());
+                CHARSET[idx] as char
+            })
             .collect()
     }
 }

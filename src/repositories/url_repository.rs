@@ -1,6 +1,7 @@
 use crate::domain::entities::url::Url;
 use crate::utils::hash::sha256_hex;
 use sqlx::Row;
+use tracing::{error, instrument};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -59,6 +60,7 @@ impl UrlRepository {
     }
 
     /// Insert a new URL record and return the generated UUID.
+    #[instrument(skip(self, url))]
     pub async fn save(&self, url: &Url) -> Result<uuid::Uuid, RepositoryError> {
         let canonical = url.to_canonical();
         let url_hash = sha256_hex(&canonical);
@@ -76,13 +78,16 @@ impl UrlRepository {
         .bind(&url_hash)
         .bind(&parsed_url)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| { error!(operation = "save", error = %e, "database error"); RepositoryError::Database(e) })?;
 
-        let id: uuid::Uuid = row.try_get("id")?;
+        let id: uuid::Uuid = row.try_get("id")
+            .map_err(|e| { error!(operation = "save.try_get_id", error = %e, "database error"); RepositoryError::Database(e) })?;
         Ok(id)
     }
 
     /// Look up a URL record by its SHA-256 hash.
+    #[instrument(skip(self))]
     pub async fn find_by_hash(&self, hash: &str) -> Result<Option<UrlRecord>, RepositoryError> {
         let row = sqlx::query(
             r#"
@@ -94,7 +99,8 @@ impl UrlRepository {
         )
         .bind(hash)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| { error!(operation = "find_by_hash", error = %e, "database error"); RepositoryError::Database(e) })?;
 
         Ok(row.map(|r| {
             let parsed_url: serde_json::Value = r.try_get("parsed_url").unwrap_or(serde_json::Value::Null);
@@ -110,6 +116,7 @@ impl UrlRepository {
     }
 
     /// Insert a new URL record with a short_code and return the generated UUID.
+    #[instrument(skip(self, url))]
     pub async fn save_with_short_code(&self, url: &Url, short_code: &str, caller_provided: bool) -> Result<uuid::Uuid, RepositoryError> {
         let canonical = url.to_canonical();
         let url_hash = sha256_hex(&canonical);
@@ -129,9 +136,11 @@ impl UrlRepository {
         .bind(short_code)
         .bind(caller_provided)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| { error!(operation = "save_with_short_code", error = %e, "database error"); RepositoryError::Database(e) })?;
 
-        let id: uuid::Uuid = row.try_get("id")?;
+        let id: uuid::Uuid = row.try_get("id")
+            .map_err(|e| { error!(operation = "save_with_short_code.try_get_id", error = %e, "database error"); RepositoryError::Database(e) })?;
         Ok(id)
     }
 }
@@ -145,6 +154,7 @@ impl UrlRepositoryPort for UrlRepository {
         UrlRepository::find_by_hash(self, hash).await
     }
 
+    #[instrument(skip(self))]
     async fn find_by_short_code(&self, short_code: &str) -> Result<Option<UrlRecord>, RepositoryError> {
         let row = sqlx::query(
             r#"
@@ -156,7 +166,8 @@ impl UrlRepositoryPort for UrlRepository {
         )
         .bind(short_code)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| { error!(operation = "find_by_short_code", error = %e, "database error"); RepositoryError::Database(e) })?;
 
         Ok(row.map(|r| {
             let parsed_url: serde_json::Value = r.try_get("parsed_url").unwrap_or(serde_json::Value::Null);

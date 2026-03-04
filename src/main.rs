@@ -14,6 +14,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tracing_subscriber::EnvFilter;
 use use_cases::create_short_code::{CreateShortCodeError, CreateShortCodeUseCase};
 use use_cases::get_url::{GetUrlError, GetUrlUseCase, UrlRepositoryPort};
 
@@ -76,14 +77,23 @@ async fn create_short_code<R: UrlRepositoryPort + Clone + Send + Sync + 'static>
     State(state): State<AppState<R>>,
     Json(body): Json<CreateShortCodeRequest>,
 ) -> axum::response::Response {
-    match state.create_short_code
+    match state
+        .create_short_code
         .execute(&body.url, body.short_code.as_deref())
         .await
     {
-        Ok(code) => (StatusCode::CREATED, Json(CreateShortCodeResponse { short_code: code })).into_response(),
-        Err(CreateShortCodeError::InvalidUrl(_)) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
+        Ok(code) => (
+            StatusCode::CREATED,
+            Json(CreateShortCodeResponse { short_code: code }),
+        )
+            .into_response(),
+        Err(CreateShortCodeError::InvalidUrl(_)) => {
+            StatusCode::UNPROCESSABLE_ENTITY.into_response()
+        }
         Err(CreateShortCodeError::ShortCodeConflict) => StatusCode::CONFLICT.into_response(),
-        Err(CreateShortCodeError::Repository(_)) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(CreateShortCodeError::Repository(_)) => {
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -95,13 +105,23 @@ where
     Router::new()
         .route("/", get(root))
         .route("/", post(create_short_code::<R>))
-        .route("/:short_code", get(redirect_short_code::<R>))
-        .route("/:short_code/about", get(about_short_code::<R>))
+        .route("/{short_code}", get(redirect_short_code::<R>))
+        .route("/{short_code}/about", get(about_short_code::<R>))
         .with_state(state)
 }
 
 #[tokio::main]
 async fn main() {
+    // Log level is controlled via RUST_LOG (default: info).
+    // Example: RUST_LOG=debug cargo run
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_target(true)
+        .with_current_span(true)
+        .with_span_list(true)
+        .init();
+
     use repositories::url_repository::UrlRepository;
     use services::short_code::ShortCodeService;
     use settings::Settings;
@@ -199,7 +219,7 @@ mod tests {
                 ShortCodeService::new(4),
             )),
         };
-        TestServer::new(app(state)).unwrap()
+        TestServer::new(app(state))
     }
 
     // -----------------------------------------------------------------------
@@ -238,7 +258,10 @@ mod tests {
 
         response.assert_status(axum::http::StatusCode::FOUND);
         assert_eq!(
-            response.headers().get("Location").and_then(|v| v.to_str().ok()),
+            response
+                .headers()
+                .get("Location")
+                .and_then(|v| v.to_str().ok()),
             Some(canonical),
             "Location header must be the canonical URL"
         );

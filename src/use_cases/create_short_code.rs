@@ -2,6 +2,7 @@ use crate::domain::entities::url::Url;
 use crate::repositories::url_repository::{RepositoryError, UrlRepositoryPort};
 use crate::services::short_code::ShortCodeService;
 use crate::utils::hash::sha256_hex;
+use tracing::{info, warn, instrument};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -28,6 +29,7 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
         CreateShortCodeUseCase { repo, short_code_service }
     }
 
+    #[instrument(skip(self, url_str, short_code), fields(caller_provided = short_code.is_some()))]
     pub async fn execute(
         &self,
         url_str: &str,
@@ -41,7 +43,10 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
         if !caller_provided {
             let hash = sha256_hex(&url.to_canonical());
             match self.repo.find_by_hash(&hash).await {
-                Ok(Some(record)) => return Ok(record.short_code),
+                Ok(Some(record)) => {
+                    info!(short_code = %record.short_code, caller_provided = false, "dedup hit: returning existing short code");
+                    return Ok(record.short_code);
+                }
                 Ok(None) => {}
                 Err(e) => return Err(CreateShortCodeError::Repository(e)),
             }
@@ -56,13 +61,16 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
         for attempt in 0..max_attempts {
             match self.repo.find_by_short_code(&code).await {
                 Ok(Some(record)) if record.canonical == url.to_canonical() => {
+                    info!(short_code = %code, caller_provided, "idempotent: short code already maps to same URL");
                     return Ok(code);
                 }
                 Ok(Some(_)) => {
                     if caller_provided {
+                        warn!(short_code = %code, "conflict: caller-provided short code already taken by different URL");
                         return Err(CreateShortCodeError::ShortCodeConflict);
                     }
                     if attempt + 1 == max_attempts {
+                        warn!(attempts = max_attempts, "retry exhaustion: all generated short codes conflicted");
                         return Err(CreateShortCodeError::ShortCodeConflict);
                     }
                     code = self.short_code_service.generate();
@@ -80,6 +88,7 @@ impl<R: UrlRepositoryPort> CreateShortCodeUseCase<R> {
             .await
             .map_err(CreateShortCodeError::Repository)?;
 
+        info!(short_code = %code, caller_provided, "short code created successfully");
         Ok(code)
     }
 }
