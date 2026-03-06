@@ -27,4 +27,5 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
 [dev-dependencies]
 axum-test = "19"
-mockall = "0.13"
+mockall = "0.14"
+tower = { version = "0.5", features = ["util"] }

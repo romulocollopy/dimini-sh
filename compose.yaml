@@ -21,9 +21,18 @@ services:
     environment:
       DATABASE_URL: postgres://dev:somepass@postgres:5432/diminish
       TERM: xterm-256color
+      RUST_LOG: "info"
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - proxy
+      - default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.diminish.rule=Host(`dimini.sh`)"
+      - "traefik.http.routers.diminish.tls=true"
+      - "traefik.http.routers.diminish.tls.certresolver=letsencrypt"
 
   postgres:
     image: postgres:16
@@ -31,8 +40,8 @@ services:
       POSTGRES_USER: dev
       POSTGRES_PASSWORD: somepass
       POSTGRES_DB: diminish
-    ports:
-      - "5432:5432"
+    # ports:
+    #   - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dev -d diminish"]
       interval: 5s
@@ -41,6 +50,12 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql
+    networks:
+      - default
 
 volumes:
   pgdata:
+
+networks:
+  proxy:
+    external: true

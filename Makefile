@@ -1,11 +1,11 @@
 .PHONY: start migrate migrate-prod test
 
 # Start the project (standalone, with its own postgres)
-start: build
+start: build proxy
 	docker compose up
 
-start-dev: build-dev
-	docker compose up -f compose.yaml -f compose.dev.yaml --build
+start-dev: build-dev proxy
+	docker compose -f compose.yaml -f compose.dev.yaml up --build
 
 build-dev:
 	docker compose -f compose.yaml -f compose.dev.yaml build
@@ -30,3 +30,6 @@ migrate-prod:
 # Run tests against the test database
 test:
 	cargo test
+
+proxy:
+	docker network create proxy --attachable &2> /dev/null
