@@ -1,0 +1,10 @@
+services:
+  app:
+    build:
+      context: .
+      target: dev
+
+    environment:
+      RUST_LOG: "dimini_sh=debug,info"
+    volumes:
+      - .:/home/app

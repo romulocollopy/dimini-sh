@@ -1,3 +1,4 @@
+mod middleware;
 use crate::use_cases::create_short_code::{CreateShortCodeError, CreateShortCodeUseCase};
 use crate::use_cases::get_url::{GetUrlError, GetUrlUseCase, UrlRepositoryPort};
 use axum::{
@@ -7,13 +8,10 @@ use axum::{
     routing::{get, get_service, post},
     Router,
 };
+use middleware::RequestLoggingLayer;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
-
-// ---------------------------------------------------------------------------
-// App state
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct AppState<R: UrlRepositoryPort + Clone + Send + Sync + 'static> {
@@ -96,6 +94,7 @@ where
         .nest_service("/assets/", ServeDir::new("public/assets"))
         .route("/{short_code}", get(redirect_short_code::<R>))
         .route("/{short_code}/about", get(about_short_code::<R>))
+        .layer(RequestLoggingLayer::new())
         .with_state(state)
 }
 
