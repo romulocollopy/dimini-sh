@@ -14,6 +14,9 @@ pub struct Settings {
     host: String,
     port: u16,
     short_code_length: u8,
+    /// `tracing` filter directive (same syntax as `RUST_LOG`), e.g. `"info"` or `"dimini_sh=debug,info"`.
+    /// Can be overridden at runtime with the `LOG_LEVEL` environment variable.
+    log_level: String,
 }
 
 impl Settings {
@@ -38,12 +41,18 @@ impl Settings {
             host: "0.0.0.0".to_string(),
             port: 3000,
             short_code_length: 4,
+            log_level: "info".to_string(),
         }
     }
 
     /// Return the configured short code length.
     pub fn get_short_code_length(&self) -> u8 {
         self.short_code_length
+    }
+
+    /// Return the log filter directive (same syntax as `RUST_LOG`).
+    pub fn get_log_level(&self) -> &str {
+        &self.log_level
     }
 
     /// Return the database URL, panicking if in Test env but URL lacks "test".
@@ -98,6 +107,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 3000,
             short_code_length: 4,
+            log_level: "info".to_string(),
         };
         settings.get_database_url();
     }
@@ -132,8 +142,23 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 3000,
             short_code_length: 4,
+            log_level: "info".to_string(),
         };
         let url = settings.get_database_url();
         assert!(url.contains("test"));
+    }
+
+    /// `get_log_level()` must return the value from `settings.yaml`.
+    #[test]
+    fn load_returns_log_level_info() {
+        let settings = Settings::load();
+        assert_eq!(settings.get_log_level(), "info");
+    }
+
+    /// `testing()` must expose a log_level of "info".
+    #[test]
+    fn testing_returns_log_level_info() {
+        let settings = Settings::testing();
+        assert_eq!(settings.get_log_level(), "info");
     }
 }

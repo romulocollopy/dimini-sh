@@ -11,14 +11,6 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_target(true)
-        .with_current_span(true)
-        .with_span_list(true)
-        .init();
-
     use repositories::url_repository::UrlRepository;
     use services::short_code::ShortCodeService;
     use settings::Settings;
@@ -27,6 +19,19 @@ async fn main() {
     use webapp::{app, AppState};
 
     let settings = Settings::load();
+
+    // Honour RUST_LOG if set, otherwise fall back to the value in settings.yaml.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(settings.get_log_level()));
+
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_current_span(true)
+        .with_span_list(true)
+        .init();
+
     let pool = sqlx::PgPool::connect(settings.get_database_url())
         .await
         .expect("failed to connect to database");
