@@ -122,6 +122,12 @@ mod tests {
     }
 
     impl UrlRepositoryPort for ClonableMock {
+        // SAFETY: The MutexGuard is released before the returned future is awaited.
+        // This is sound because mockall's `.returning()` closures always produce
+        // immediately-ready futures — they never capture the guard across an await point.
+        // If any expectation ever returned a genuinely async future that captured the
+        // guard, it would deadlock or fail to compile with Send bounds. Do not change
+        // this pattern without verifying that invariant.
         fn find_by_short_code(
             &self,
             short_code: &str,
